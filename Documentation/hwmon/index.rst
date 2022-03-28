@@ -43,6 +43,7 @@ Hardware Monitoring Kernel Drivers
    asb100
    asc7621
    aspeed-pwm-tacho
+   asus_ec_sensors
    asus_wmi_ec_sensors
    asus_wmi_sensors
    bcm54140
@@ -160,6 +161,7 @@ Hardware Monitoring Kernel Drivers
    pc87427
    pcf8591
    pim4328
+   pli1209bc
    pm6764tr
    pmbus
    powr1220
@@ -185,6 +187,7 @@ Hardware Monitoring Kernel Drivers
    smsc47m1
    sparx5-temp
    stpddc60
+   sy7636a-hwmon
    tc654
    tc74
    thmc50
@@ -193,6 +196,7 @@ Hardware Monitoring Kernel Drivers
    tmp108
    tmp401
    tmp421
+   tmp464
    tmp513
    tps23861
    tps40422

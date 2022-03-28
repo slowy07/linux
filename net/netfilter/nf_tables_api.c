@@ -550,6 +550,58 @@ static int nft_delflowtable(struct nft_ctx *ctx,
 	return err;
 }
 
+static void __nft_reg_track_clobber(struct nft_regs_track *track, u8 dreg)
+{
+	int i;
+
+	for (i = track->regs[dreg].num_reg; i > 0; i--)
+		__nft_reg_track_cancel(track, dreg - i);
+}
+
+static void __nft_reg_track_update(struct nft_regs_track *track,
+				   const struct nft_expr *expr,
+				   u8 dreg, u8 num_reg)
+{
+	track->regs[dreg].selector = expr;
+	track->regs[dreg].bitwise = NULL;
+	track->regs[dreg].num_reg = num_reg;
+}
+
+void nft_reg_track_update(struct nft_regs_track *track,
+			  const struct nft_expr *expr, u8 dreg, u8 len)
+{
+	unsigned int regcount;
+	int i;
+
+	__nft_reg_track_clobber(track, dreg);
+
+	regcount = DIV_ROUND_UP(len, NFT_REG32_SIZE);
+	for (i = 0; i < regcount; i++, dreg++)
+		__nft_reg_track_update(track, expr, dreg, i);
+}
+EXPORT_SYMBOL_GPL(nft_reg_track_update);
+
+void nft_reg_track_cancel(struct nft_regs_track *track, u8 dreg, u8 len)
+{
+	unsigned int regcount;
+	int i;
+
+	__nft_reg_track_clobber(track, dreg);
+
+	regcount = DIV_ROUND_UP(len, NFT_REG32_SIZE);
+	for (i = 0; i < regcount; i++, dreg++)
+		__nft_reg_track_cancel(track, dreg);
+}
+EXPORT_SYMBOL_GPL(nft_reg_track_cancel);
+
+void __nft_reg_track_cancel(struct nft_regs_track *track, u8 dreg)
+{
+	track->regs[dreg].selector = NULL;
+	track->regs[dreg].bitwise = NULL;
+	track->regs[dreg].num_reg = 0;
+}
+EXPORT_SYMBOL_GPL(__nft_reg_track_cancel);
+
 /*
  * Tables
  */
@@ -1072,6 +1124,30 @@ static int nft_objname_hash_cmp(struct rhashtable_compare_arg *arg,
 	return strcmp(obj->key.name, k->name);
 }
 
+static bool nft_supported_family(u8 family)
+{
+	return false
+#ifdef CONFIG_NF_TABLES_INET
+		|| family == NFPROTO_INET
+#endif
+#ifdef CONFIG_NF_TABLES_IPV4
+		|| family == NFPROTO_IPV4
+#endif
+#ifdef CONFIG_NF_TABLES_ARP
+		|| family == NFPROTO_ARP
+#endif
+#ifdef CONFIG_NF_TABLES_NETDEV
+		|| family == NFPROTO_NETDEV
+#endif
+#if IS_ENABLED(CONFIG_NF_TABLES_BRIDGE)
+		|| family == NFPROTO_BRIDGE
+#endif
+#ifdef CONFIG_NF_TABLES_IPV6
+		|| family == NFPROTO_IPV6
+#endif
+		;
+}
+
 static int nf_tables_newtable(struct sk_buff *skb, const struct nfnl_info *info,
 			      const struct nlattr * const nla[])
 {
@@ -1085,6 +1161,9 @@ static int nf_tables_newtable(struct sk_buff *skb, const struct nfnl_info *info,
 	struct nft_ctx ctx;
 	u32 flags = 0;
 	int err;
+
+	if (!nft_supported_family(family))
+		return -EOPNOTSUPP;
 
 	lockdep_assert_held(&nft_net->commit_mutex);
 	attr = nla[NFTA_TABLE_NAME];
@@ -4502,7 +4581,7 @@ static void nft_set_catchall_destroy(const struct nft_ctx *ctx,
 	list_for_each_entry_safe(catchall, next, &set->catchall_list, list) {
 		list_del_rcu(&catchall->list);
 		nft_set_elem_destroy(set, catchall->elem, true);
-		kfree_rcu(catchall);
+		kfree_rcu(catchall, rcu);
 	}
 }
 
@@ -5669,7 +5748,7 @@ static void nft_setelem_catchall_remove(const struct net *net,
 	list_for_each_entry_safe(catchall, next, &set->catchall_list, list) {
 		if (catchall->elem == elem->priv) {
 			list_del_rcu(&catchall->list);
-			kfree_rcu(catchall);
+			kfree_rcu(catchall, rcu);
 			break;
 		}
 	}
@@ -8260,6 +8339,21 @@ void nf_tables_trans_destroy_flush_work(void)
 }
 EXPORT_SYMBOL_GPL(nf_tables_trans_destroy_flush_work);
 
+static bool nft_expr_reduce(struct nft_regs_track *track,
+			    const struct nft_expr *expr)
+{
+	if (!expr->ops->reduce) {
+		pr_warn_once("missing reduce for expression %s ",
+			     expr->ops->type->name);
+		return false;
+	}
+
+	if (nft_reduce_is_readonly(expr))
+		return false;
+
+	return expr->ops->reduce(track, expr);
+}
+
 static int nf_tables_commit_chain_prepare(struct net *net, struct nft_chain *chain)
 {
 	const struct nft_expr *expr, *last;
@@ -8307,8 +8401,7 @@ static int nf_tables_commit_chain_prepare(struct net *net, struct nft_chain *cha
 		nft_rule_for_each_expr(expr, last, rule) {
 			track.cur = expr;
 
-			if (expr->ops->reduce &&
-			    expr->ops->reduce(&track, expr)) {
+			if (nft_expr_reduce(&track, expr)) {
 				expr = track.cur;
 				continue;
 			}
@@ -9270,17 +9363,23 @@ int nft_parse_u32_check(const struct nlattr *attr, int max, u32 *dest)
 }
 EXPORT_SYMBOL_GPL(nft_parse_u32_check);
 
-static unsigned int nft_parse_register(const struct nlattr *attr)
+static unsigned int nft_parse_register(const struct nlattr *attr, u32 *preg)
 {
 	unsigned int reg;
 
 	reg = ntohl(nla_get_be32(attr));
 	switch (reg) {
 	case NFT_REG_VERDICT...NFT_REG_4:
-		return reg * NFT_REG_SIZE / NFT_REG32_SIZE;
+		*preg = reg * NFT_REG_SIZE / NFT_REG32_SIZE;
+		break;
+	case NFT_REG32_00...NFT_REG32_15:
+		*preg = reg + NFT_REG_SIZE / NFT_REG32_SIZE - NFT_REG32_00;
+		break;
 	default:
-		return reg + NFT_REG_SIZE / NFT_REG32_SIZE - NFT_REG32_00;
+		return -ERANGE;
 	}
+
+	return 0;
 }
 
 /**
@@ -9322,7 +9421,10 @@ int nft_parse_register_load(const struct nlattr *attr, u8 *sreg, u32 len)
 	u32 reg;
 	int err;
 
-	reg = nft_parse_register(attr);
+	err = nft_parse_register(attr, &reg);
+	if (err < 0)
+		return err;
+
 	err = nft_validate_register_load(reg, len);
 	if (err < 0)
 		return err;
@@ -9377,7 +9479,10 @@ int nft_parse_register_store(const struct nft_ctx *ctx,
 	int err;
 	u32 reg;
 
-	reg = nft_parse_register(attr);
+	err = nft_parse_register(attr, &reg);
+	if (err < 0)
+		return err;
+
 	err = nft_validate_register_store(ctx, reg, data, type, len);
 	if (err < 0)
 		return err;
