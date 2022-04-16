@@ -794,7 +794,8 @@ bool blk_update_request(struct request *req, blk_status_t error,
 #endif
 
 	if (unlikely(error && !blk_rq_is_passthrough(req) &&
-		     !(req->rq_flags & RQF_QUIET))) {
+		     !(req->rq_flags & RQF_QUIET)) &&
+		     !test_bit(GD_DEAD, &req->q->disk->state)) {
 		blk_print_req_error(req, error);
 		trace_block_rq_error(req, error, nr_bytes);
 	}
@@ -4462,21 +4463,28 @@ static bool blk_mq_elv_switch_none(struct list_head *head,
 	return true;
 }
 
-static void blk_mq_elv_switch_back(struct list_head *head,
-		struct request_queue *q)
+static struct blk_mq_qe_pair *blk_lookup_qe_pair(struct list_head *head,
+						struct request_queue *q)
 {
 	struct blk_mq_qe_pair *qe;
-	struct elevator_type *t = NULL;
 
 	list_for_each_entry(qe, head, node)
-		if (qe->q == q) {
-			t = qe->type;
-			break;
-		}
+		if (qe->q == q)
+			return qe;
 
-	if (!t)
+	return NULL;
+}
+
+static void blk_mq_elv_switch_back(struct list_head *head,
+				  struct request_queue *q)
+{
+	struct blk_mq_qe_pair *qe;
+	struct elevator_type *t;
+
+	qe = blk_lookup_qe_pair(head, q);
+	if (!qe)
 		return;
-
+	t = qe->type;
 	list_del(&qe->node);
 	kfree(qe);
 

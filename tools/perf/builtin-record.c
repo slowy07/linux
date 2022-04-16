@@ -987,10 +987,13 @@ static int record__thread_data_init_maps(struct record_thread *thread_data, stru
 	int m, tm, nr_mmaps = evlist->core.nr_mmaps;
 	struct mmap *mmap = evlist->mmap;
 	struct mmap *overwrite_mmap = evlist->overwrite_mmap;
-	struct perf_cpu_map *cpus = evlist->core.cpus;
+	struct perf_cpu_map *cpus = evlist->core.user_requested_cpus;
 
-	thread_data->nr_mmaps = bitmap_weight(thread_data->mask->maps.bits,
-					      thread_data->mask->maps.nbits);
+	if (cpu_map__is_dummy(cpus))
+		thread_data->nr_mmaps = nr_mmaps;
+	else
+		thread_data->nr_mmaps = bitmap_weight(thread_data->mask->maps.bits,
+						      thread_data->mask->maps.nbits);
 	if (mmap) {
 		thread_data->maps = zalloc(thread_data->nr_mmaps * sizeof(struct mmap *));
 		if (!thread_data->maps)
@@ -1007,16 +1010,17 @@ static int record__thread_data_init_maps(struct record_thread *thread_data, stru
 		 thread_data->nr_mmaps, thread_data->maps, thread_data->overwrite_maps);
 
 	for (m = 0, tm = 0; m < nr_mmaps && tm < thread_data->nr_mmaps; m++) {
-		if (test_bit(cpus->map[m].cpu, thread_data->mask->maps.bits)) {
+		if (cpu_map__is_dummy(cpus) ||
+		    test_bit(cpus->map[m].cpu, thread_data->mask->maps.bits)) {
 			if (thread_data->maps) {
 				thread_data->maps[tm] = &mmap[m];
 				pr_debug2("thread_data[%p]: cpu%d: maps[%d] -> mmap[%d]\n",
-					  thread_data, cpus->map[m].cpu, tm, m);
+					  thread_data, perf_cpu_map__cpu(cpus, m).cpu, tm, m);
 			}
 			if (thread_data->overwrite_maps) {
 				thread_data->overwrite_maps[tm] = &overwrite_mmap[m];
 				pr_debug2("thread_data[%p]: cpu%d: ow_maps[%d] -> ow_mmap[%d]\n",
-					  thread_data, cpus->map[m].cpu, tm, m);
+					  thread_data, perf_cpu_map__cpu(cpus, m).cpu, tm, m);
 			}
 			tm++;
 		}
@@ -1881,7 +1885,7 @@ static int record__synthesize(struct record *rec, bool tail)
 		return err;
 	}
 
-	err = perf_event__synthesize_cpu_map(&rec->tool, rec->evlist->core.cpus,
+	err = perf_event__synthesize_cpu_map(&rec->tool, rec->evlist->core.user_requested_cpus,
 					     process_synthesized_event, NULL);
 	if (err < 0) {
 		pr_err("Couldn't synthesize cpu map.\n");
@@ -3329,6 +3333,9 @@ static void record__mmap_cpu_mask_init(struct mmap_cpu_mask *mask, struct perf_c
 {
 	int c;
 
+	if (cpu_map__is_dummy(cpus))
+		return;
+
 	for (c = 0; c < cpus->nr; c++)
 		set_bit(cpus->map[c].cpu, mask->bits);
 }
@@ -3675,10 +3682,15 @@ static int record__init_thread_default_masks(struct record *rec, struct perf_cpu
 static int record__init_thread_masks(struct record *rec)
 {
 	int ret = 0;
-	struct perf_cpu_map *cpus = rec->evlist->core.cpus;
+	struct perf_cpu_map *cpus = rec->evlist->core.user_requested_cpus;
 
 	if (!record__threads_enabled(rec))
 		return record__init_thread_default_masks(rec, cpus);
+
+	if (cpu_map__is_dummy(cpus)) {
+		pr_err("--per-thread option is mutually exclusive to parallel streaming mode.\n");
+		return -EINVAL;
+	}
 
 	switch (rec->opts.threads_spec) {
 	case THREAD_SPEC__CPU:

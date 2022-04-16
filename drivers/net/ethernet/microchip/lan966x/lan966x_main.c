@@ -408,6 +408,9 @@ static int lan966x_port_ioctl(struct net_device *dev, struct ifreq *ifr,
 		}
 	}
 
+	if (!dev->phydev)
+		return -ENODEV;
+
 	return phy_mii_ioctl(dev->phydev, ifr, cmd);
 }
 
@@ -442,6 +445,12 @@ static bool lan966x_hw_offload(struct lan966x *lan966x, u32 port,
 	if (!(val & (ANA_CPU_FWD_CFG_IGMP_REDIR_ENA |
 		     ANA_CPU_FWD_CFG_MLD_REDIR_ENA)))
 		return true;
+
+	if (eth_type_vlan(skb->protocol)) {
+		skb = skb_vlan_untag(skb);
+		if (unlikely(!skb))
+			return false;
+	}
 
 	if (skb->protocol == htons(ETH_P_IP) &&
 	    ip_hdr(skb)->protocol == IPPROTO_IGMP)
