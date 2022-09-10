@@ -328,14 +328,17 @@ static u8 hci_cc_delete_stored_link_key(struct hci_dev *hdev, void *data,
 					struct sk_buff *skb)
 {
 	struct hci_rp_delete_stored_link_key *rp = data;
+	u16 num_keys;
 
 	bt_dev_dbg(hdev, "status 0x%2.2x", rp->status);
 
 	if (rp->status)
 		return rp->status;
 
-	if (rp->num_keys <= hdev->stored_num_keys)
-		hdev->stored_num_keys -= le16_to_cpu(rp->num_keys);
+	num_keys = le16_to_cpu(rp->num_keys);
+
+	if (num_keys <= hdev->stored_num_keys)
+		hdev->stored_num_keys -= num_keys;
 	else
 		hdev->stored_num_keys = 0;
 
@@ -4176,6 +4179,17 @@ static void hci_cmd_complete_evt(struct hci_dev *hdev, void *data,
 		}
 	}
 
+	if (i == ARRAY_SIZE(hci_cc_table)) {
+		/* Unknown opcode, assume byte 0 contains the status, so
+		 * that e.g. __hci_cmd_sync() properly returns errors
+		 * for vendor specific commands send by HCI drivers.
+		 * If a vendor doesn't actually follow this convention we may
+		 * need to introduce a vendor CC table in order to properly set
+		 * the status.
+		 */
+		*status = skb->data[0];
+	}
+
 	handle_cmd_cnt_and_timer(hdev, ev->ncmd);
 
 	hci_req_cmd_complete(hdev, *opcode, *status, req_complete,
@@ -5787,7 +5801,7 @@ static void le_conn_complete_evt(struct hci_dev *hdev, u8 status,
 	 */
 	hci_dev_clear_flag(hdev, HCI_LE_ADV);
 
-	conn = hci_lookup_le_connect(hdev);
+	conn = hci_conn_hash_lookup_ba(hdev, LE_LINK, bdaddr);
 	if (!conn) {
 		/* In case of error status and there is no connection pending
 		 * just unlock as there is nothing to cleanup.

@@ -1450,9 +1450,10 @@ int io_req_prep_async(struct io_kiocb *req)
 		return 0;
 	if (WARN_ON_ONCE(req_has_async_data(req)))
 		return -EFAULT;
-	if (io_alloc_async_data(req))
-		return -EAGAIN;
-
+	if (!io_op_defs[req->opcode].manual_alloc) {
+		if (io_alloc_async_data(req))
+			return -EAGAIN;
+	}
 	return def->prep_async(req);
 }
 
@@ -1727,6 +1728,7 @@ static void io_queue_async(struct io_kiocb *req, int ret)
 
 	switch (io_arm_poll_handler(req, 0)) {
 	case IO_APOLL_READY:
+		io_kbuf_recycle(req, 0);
 		io_req_task_queue(req);
 		break;
 	case IO_APOLL_ABORTED:
@@ -2639,7 +2641,6 @@ static __cold void io_ring_ctx_wait_and_kill(struct io_ring_ctx *ctx)
 		io_unregister_personality(ctx, index);
 	if (ctx->rings)
 		io_poll_remove_all(ctx, NULL, true);
-	io_notif_unregister(ctx);
 	mutex_unlock(&ctx->uring_lock);
 
 	/* failed during ring init, it couldn't have issued any requests */
@@ -3838,15 +3839,6 @@ static int __io_uring_register(struct io_ring_ctx *ctx, unsigned opcode,
 			break;
 		ret = io_register_file_alloc_range(ctx, arg);
 		break;
-	case IORING_REGISTER_NOTIFIERS:
-		ret = io_notif_register(ctx, arg, nr_args);
-		break;
-	case IORING_UNREGISTER_NOTIFIERS:
-		ret = -EINVAL;
-		if (arg || nr_args)
-			break;
-		ret = io_notif_unregister(ctx);
-		break;
 	default:
 		ret = -EINVAL;
 		break;
@@ -3885,13 +3877,15 @@ out_fput:
 
 static int __init io_uring_init(void)
 {
-#define __BUILD_BUG_VERIFY_ELEMENT(stype, eoffset, etype, ename) do { \
+#define __BUILD_BUG_VERIFY_OFFSET_SIZE(stype, eoffset, esize, ename) do { \
 	BUILD_BUG_ON(offsetof(stype, ename) != eoffset); \
-	BUILD_BUG_ON(sizeof(etype) != sizeof_field(stype, ename)); \
+	BUILD_BUG_ON(sizeof_field(stype, ename) != esize); \
 } while (0)
 
 #define BUILD_BUG_SQE_ELEM(eoffset, etype, ename) \
-	__BUILD_BUG_VERIFY_ELEMENT(struct io_uring_sqe, eoffset, etype, ename)
+	__BUILD_BUG_VERIFY_OFFSET_SIZE(struct io_uring_sqe, eoffset, sizeof(etype), ename)
+#define BUILD_BUG_SQE_ELEM_SIZE(eoffset, esize, ename) \
+	__BUILD_BUG_VERIFY_OFFSET_SIZE(struct io_uring_sqe, eoffset, esize, ename)
 	BUILD_BUG_ON(sizeof(struct io_uring_sqe) != 64);
 	BUILD_BUG_SQE_ELEM(0,  __u8,   opcode);
 	BUILD_BUG_SQE_ELEM(1,  __u8,   flags);
@@ -3899,6 +3893,8 @@ static int __init io_uring_init(void)
 	BUILD_BUG_SQE_ELEM(4,  __s32,  fd);
 	BUILD_BUG_SQE_ELEM(8,  __u64,  off);
 	BUILD_BUG_SQE_ELEM(8,  __u64,  addr2);
+	BUILD_BUG_SQE_ELEM(8,  __u32,  cmd_op);
+	BUILD_BUG_SQE_ELEM(12, __u32, __pad1);
 	BUILD_BUG_SQE_ELEM(16, __u64,  addr);
 	BUILD_BUG_SQE_ELEM(16, __u64,  splice_off_in);
 	BUILD_BUG_SQE_ELEM(24, __u32,  len);
@@ -3917,13 +3913,22 @@ static int __init io_uring_init(void)
 	BUILD_BUG_SQE_ELEM(28, __u32,  statx_flags);
 	BUILD_BUG_SQE_ELEM(28, __u32,  fadvise_advice);
 	BUILD_BUG_SQE_ELEM(28, __u32,  splice_flags);
+	BUILD_BUG_SQE_ELEM(28, __u32,  rename_flags);
+	BUILD_BUG_SQE_ELEM(28, __u32,  unlink_flags);
+	BUILD_BUG_SQE_ELEM(28, __u32,  hardlink_flags);
+	BUILD_BUG_SQE_ELEM(28, __u32,  xattr_flags);
+	BUILD_BUG_SQE_ELEM(28, __u32,  msg_ring_flags);
 	BUILD_BUG_SQE_ELEM(32, __u64,  user_data);
 	BUILD_BUG_SQE_ELEM(40, __u16,  buf_index);
 	BUILD_BUG_SQE_ELEM(40, __u16,  buf_group);
 	BUILD_BUG_SQE_ELEM(42, __u16,  personality);
 	BUILD_BUG_SQE_ELEM(44, __s32,  splice_fd_in);
 	BUILD_BUG_SQE_ELEM(44, __u32,  file_index);
+	BUILD_BUG_SQE_ELEM(44, __u16,  addr_len);
+	BUILD_BUG_SQE_ELEM(46, __u16,  __pad3[0]);
 	BUILD_BUG_SQE_ELEM(48, __u64,  addr3);
+	BUILD_BUG_SQE_ELEM_SIZE(48, 0, cmd);
+	BUILD_BUG_SQE_ELEM(56, __u64,  __pad2);
 
 	BUILD_BUG_ON(sizeof(struct io_uring_files_update) !=
 		     sizeof(struct io_uring_rsrc_update));

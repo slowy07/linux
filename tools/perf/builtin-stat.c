@@ -71,7 +71,6 @@
 #include "util/bpf_counter.h"
 #include "util/iostat.h"
 #include "util/pmu-hybrid.h"
- #include "util/topdown.h"
 #include "asm/bug.h"
 
 #include <linux/time64.h>
@@ -827,6 +826,7 @@ static int __run_perf_stat(int argc, const char **argv, int run_idx)
 	}
 
 	evlist__for_each_entry(evsel_list, counter) {
+		counter->reset_group = false;
 		if (bpf_counter__load(counter, &target))
 			return -1;
 		if (!evsel__is_bpf(counter))
@@ -1250,6 +1250,8 @@ static struct option stat_options[] = {
 		    "Merge identical named hybrid events"),
 	OPT_STRING('x', "field-separator", &stat_config.csv_sep, "separator",
 		   "print counts with custom separator"),
+	OPT_BOOLEAN('j', "json-output", &stat_config.json_output,
+		   "print counts in JSON format"),
 	OPT_CALLBACK('G', "cgroup", &evsel_list, "name",
 		     "monitor event in cgroup name only", parse_stat_cgroups),
 	OPT_STRING(0, "for-each-cgroup", &stat_config.cgroup_list, "name",
@@ -1436,6 +1438,7 @@ static aggr_cpu_id_get_t aggr_mode__get_aggr(enum aggr_mode aggr_mode)
 	case AGGR_GLOBAL:
 	case AGGR_THREAD:
 	case AGGR_UNSET:
+	case AGGR_MAX:
 	default:
 		return NULL;
 	}
@@ -1460,6 +1463,7 @@ static aggr_get_id_t aggr_mode__get_id(enum aggr_mode aggr_mode)
 	case AGGR_GLOBAL:
 	case AGGR_THREAD:
 	case AGGR_UNSET:
+	case AGGR_MAX:
 	default:
 		return NULL;
 	}
@@ -1610,6 +1614,7 @@ static aggr_cpu_id_get_t aggr_mode__get_aggr_file(enum aggr_mode aggr_mode)
 	case AGGR_GLOBAL:
 	case AGGR_THREAD:
 	case AGGR_UNSET:
+	case AGGR_MAX:
 	default:
 		return NULL;
 	}
@@ -1630,6 +1635,7 @@ static aggr_get_id_t aggr_mode__get_id_file(enum aggr_mode aggr_mode)
 	case AGGR_GLOBAL:
 	case AGGR_THREAD:
 	case AGGR_UNSET:
+	case AGGR_MAX:
 	default:
 		return NULL;
 	}
@@ -1926,6 +1932,9 @@ setup_metrics:
 		free(str);
 	}
 
+	if (!stat_config.topdown_level)
+		stat_config.topdown_level = TOPDOWN_MAX_LEVEL;
+
 	if (!evsel_list->core.nr_entries) {
 		if (target__has_cpu(&target))
 			default_attrs0[0].config = PERF_COUNT_SW_CPU_CLOCK;
@@ -1942,8 +1951,6 @@ setup_metrics:
 		}
 		if (evlist__add_default_attrs(evsel_list, default_attrs1) < 0)
 			return -1;
-
-		stat_config.topdown_level = TOPDOWN_MAX_LEVEL;
 		/* Platform specific attrs */
 		if (evlist__add_default_attrs(evsel_list, default_null_attrs) < 0)
 			return -1;
