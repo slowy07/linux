@@ -1439,6 +1439,10 @@ N: Justin Guyett
 E: jguyett@andrew.cmu.edu
 D: via-rhine net driver hacking
 
+N: Nitin Gupta
+E: ngupta@vflare.org
+D: zsmalloc memory allocator and zram block device driver
+
 N: Danny ter Haar
 E: dth@cistron.nl
 D: /proc/cpuinfo, reboot on panic , kernel pre-patch tester ;)
@@ -2484,6 +2488,13 @@ D: XF86_Mach32
 D: XF86_Mach8
 D: XF86_8514
 D: cfdisk (curses based disk partitioning program)
+
+N: Mat Martineau
+E: mat@martineau.name
+D: MPTCP subsystem co-maintainer 2020-2023
+D: Keyctl restricted keyring and Diffie-Hellman UAPI
+D: Bluetooth L2CAP ERTM mode and AMP
+S: USA
 
 N: John S. Marvin
 E: jsm@fc.hp.com

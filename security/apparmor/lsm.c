@@ -21,7 +21,7 @@
 #include <linux/user_namespace.h>
 #include <linux/netfilter_ipv4.h>
 #include <linux/netfilter_ipv6.h>
-#include <linux/zlib.h>
+#include <linux/zstd.h>
 #include <net/sock.h>
 #include <uapi/linux/mount.h>
 
@@ -163,12 +163,15 @@ static int apparmor_capget(struct task_struct *target, kernel_cap_t *effective,
 		struct label_it i;
 
 		label_for_each_confined(i, label, profile) {
+			struct aa_ruleset *rules;
 			if (COMPLAIN_MODE(profile))
 				continue;
+			rules = list_first_entry(&profile->rules,
+						 typeof(*rules), list);
 			*effective = cap_intersect(*effective,
-						   profile->caps.allow);
+						   rules->caps.allow);
 			*permitted = cap_intersect(*permitted,
-						   profile->caps.allow);
+						   rules->caps.allow);
 		}
 	}
 	rcu_read_unlock();
@@ -331,6 +334,11 @@ static int apparmor_path_mknod(const struct path *dir, struct dentry *dentry,
 static int apparmor_path_truncate(const struct path *path)
 {
 	return common_perm_cond(OP_TRUNC, path, MAY_WRITE | AA_MAY_SETATTR);
+}
+
+static int apparmor_file_truncate(struct file *file)
+{
+	return apparmor_path_truncate(&file->f_path);
 }
 
 static int apparmor_path_symlink(const struct path *dir, struct dentry *dentry,
@@ -656,7 +664,8 @@ static int apparmor_setprocattr(const char *name, void *value,
 	char *command, *largs = NULL, *args = value;
 	size_t arg_size;
 	int error;
-	DEFINE_AUDIT_DATA(sa, LSM_AUDIT_DATA_NONE, OP_SETPROCATTR);
+	DEFINE_AUDIT_DATA(sa, LSM_AUDIT_DATA_NONE, AA_CLASS_NONE,
+			  OP_SETPROCATTR);
 
 	if (size == 0)
 		return -EINVAL;
@@ -746,7 +755,7 @@ static void apparmor_bprm_committing_creds(struct linux_binprm *bprm)
 }
 
 /**
- * apparmor_bprm_committed_cred - do cleanup after new creds committed
+ * apparmor_bprm_committed_creds() - do cleanup after new creds committed
  * @bprm: binprm for the exec  (NOT NULL)
  */
 static void apparmor_bprm_committed_creds(struct linux_binprm *bprm)
@@ -1112,11 +1121,10 @@ static struct aa_label *sk_peer_label(struct sock *sk)
  * Note: for tcp only valid if using ipsec or cipso on lan
  */
 static int apparmor_socket_getpeersec_stream(struct socket *sock,
-					     char __user *optval,
-					     int __user *optlen,
+					     sockptr_t optval, sockptr_t optlen,
 					     unsigned int len)
 {
-	char *name;
+	char *name = NULL;
 	int slen, error = 0;
 	struct aa_label *label;
 	struct aa_label *peer;
@@ -1133,23 +1141,21 @@ static int apparmor_socket_getpeersec_stream(struct socket *sock,
 	/* don't include terminating \0 in slen, it breaks some apps */
 	if (slen < 0) {
 		error = -ENOMEM;
-	} else {
-		if (slen > len) {
-			error = -ERANGE;
-		} else if (copy_to_user(optval, name, slen)) {
-			error = -EFAULT;
-			goto out;
-		}
-		if (put_user(slen, optlen))
-			error = -EFAULT;
-out:
-		kfree(name);
-
+		goto done;
+	}
+	if (slen > len) {
+		error = -ERANGE;
+		goto done_len;
 	}
 
+	if (copy_to_sockptr(optval, name, slen))
+		error = -EFAULT;
+done_len:
+	if (copy_to_sockptr(optlen, &slen, sizeof(slen)))
+		error = -EFAULT;
 done:
 	end_current_label_crit_section(label);
-
+	kfree(name);
 	return error;
 }
 
@@ -1203,10 +1209,10 @@ static int apparmor_inet_conn_request(const struct sock *sk, struct sk_buff *skb
 #endif
 
 /*
- * The cred blob is a pointer to, not an instance of, an aa_task_ctx.
+ * The cred blob is a pointer to, not an instance of, an aa_label.
  */
 struct lsm_blob_sizes apparmor_blob_sizes __lsm_ro_after_init = {
-	.lbs_cred = sizeof(struct aa_task_ctx *),
+	.lbs_cred = sizeof(struct aa_label *),
 	.lbs_file = sizeof(struct aa_file_ctx),
 	.lbs_task = sizeof(struct aa_task_ctx),
 };
@@ -1241,6 +1247,7 @@ static struct security_hook_list apparmor_hooks[] __lsm_ro_after_init = {
 	LSM_HOOK_INIT(mmap_file, apparmor_mmap_file),
 	LSM_HOOK_INIT(file_mprotect, apparmor_file_mprotect),
 	LSM_HOOK_INIT(file_lock, apparmor_file_lock),
+	LSM_HOOK_INIT(file_truncate, apparmor_file_truncate),
 
 	LSM_HOOK_INIT(getprocattr, apparmor_getprocattr),
 	LSM_HOOK_INIT(setprocattr, apparmor_setprocattr),
@@ -1370,7 +1377,7 @@ module_param_named(export_binary, aa_g_export_binary, aabool, 0600);
 #endif
 
 /* policy loaddata compression level */
-int aa_g_rawdata_compression_level = Z_DEFAULT_COMPRESSION;
+int aa_g_rawdata_compression_level = AA_DEFAULT_CLEVEL;
 module_param_named(rawdata_compression_level, aa_g_rawdata_compression_level,
 		   aacompressionlevel, 0400);
 
@@ -1552,9 +1559,8 @@ static int param_set_aacompressionlevel(const char *val,
 	error = param_set_int(val, kp);
 
 	aa_g_rawdata_compression_level = clamp(aa_g_rawdata_compression_level,
-					       Z_NO_COMPRESSION,
-					       Z_BEST_COMPRESSION);
-	pr_info("AppArmor: policy rawdata compression level set to %u\n",
+					       AA_MIN_CLEVEL, AA_MAX_CLEVEL);
+	pr_info("AppArmor: policy rawdata compression level set to %d\n",
 		aa_g_rawdata_compression_level);
 
 	return error;
